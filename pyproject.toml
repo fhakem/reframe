@@ -1,0 +1,48 @@
+[project]
+name = "reframe"
+version = "0.1.0"
+description = "Reframe 16:9 / 2.39:1 video to 9:16 with smart crop + temporally coherent seam carving"
+authors = [
+    { name = "fhakem", email = "106493727+fhakem@users.noreply.github.com" }
+]
+requires-python = ">=3.12,<3.13"
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.17",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-benchmark>=5.3.1",
+    "ruff>=0.17.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "NPY", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: needs torch with CUDA or MPS (nightly GPU job)",
+    "slow: end-to-end video tests that shell out to ffmpeg",
+]
