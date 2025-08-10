@@ -9,6 +9,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "numba>=0.68.1",
     "numpy>=2.5.5",
+    "opencv-contrib-python-headless>=5.1.0.95",
     "pydantic>=2.14.4",
     "typer>=0.29.2",
 ]
