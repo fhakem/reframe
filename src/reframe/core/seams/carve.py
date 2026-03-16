@@ -14,16 +14,20 @@ resolution frame with :func:`reframe.core.seams.apply.apply_removal_order`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 
-from reframe.core.energy.gradient import backward_energy, forward_costs, to_gray
-from reframe.core.seams.dp import find_seam, remove_seam
+from reframe.core.energy.gradient import to_gray
+from reframe.core.seams.fused import remove_inplace, seam_step
 from reframe.core.types import BoolArray, FloatArray, ImageArray, IntArray
 
 EnergyMode = Literal["forward", "backward"]
+
+SeamHookFn = Callable[[int, IntArray], FloatArray]
+"""Per-seam energy hook, see :data:`reframe.core.contracts.SeamHook`."""
 
 #: Penalty per protected pixel. Large but finite so the DP stays well-defined
 #: (and a seam *can* cross a protected area if nothing else is possible).
@@ -46,6 +50,12 @@ class CarveResult:
     This is the luminance discontinuity introduced by the seams, which is what
     forward energy minimises; it is reported for both modes so they can be compared.
     """
+    seam_costs: list[float] = field(default_factory=list)
+    """DP objective of each chosen seam **excluding the seam_hook term**.
+
+    It includes the mode's energy (forward step costs or backward gradient),
+    ``extra_energy`` and the protect/remove mask penalties.
+    """
 
 
 def _check_mask(mask: BoolArray | None, shape: tuple[int, int], name: str) -> BoolArray | None:
@@ -65,11 +75,17 @@ def carve_width(
     protect: BoolArray | None = None,
     remove: BoolArray | None = None,
     extra_energy: FloatArray | None = None,
+    seam_hook: SeamHookFn | None = None,
 ) -> CarveResult:
     """Remove ``n`` vertical seams from ``image``.
 
     ``extra_energy`` (H, W) is added to the per-pixel base energy; it is the
     hook for semantic energies (saliency, faces, lines...) in later milestones.
+
+    ``seam_hook(k, cols)`` is called once per seam ``k`` with ``cols`` (h, w_cur):
+    the column in the *input* image of every pixel of the current, partially
+    carved image. Its (h, w_cur) result is added to the base energy for seam
+    ``k`` only (forward units), e.g. a temporal-coherence term.
     """
     img = np.ascontiguousarray(image)
     h, w = img.shape[:2]
@@ -95,32 +111,37 @@ def carve_width(
     order = np.full((h, w), -1, dtype=np.int64)
     rows = np.arange(h)
     seams: list[IntArray] = []
+    seam_costs: list[float] = []
     created = 0.0
 
+    # Fixed-capacity buffers; the live region is [:, :wc] and shrinks in place.
+    gray = gray.copy()
+    extra = extra.copy()
+    cost = np.empty((h, w), dtype=np.float64)
+    back = np.empty((h, w), dtype=np.int8)
+    no_hook = np.empty((1, 1), dtype=np.float64)
+    forward = mode == "forward"
+
     for k in range(n):
-        costs = forward_costs(gray)
-        cl, cu, cr = costs
-        if mode == "forward":
-            seam, _ = find_seam(extra, costs)
-        else:
-            seam, _ = find_seam(backward_energy(gray) + extra)
-        created += _forward_cost_of(seam, cl, cu, cr)
+        wc = w - k
+        hook_term = no_hook
+        if seam_hook is not None:
+            hook_term = np.ascontiguousarray(seam_hook(k, cols[:, :wc]), dtype=np.float64)
+            if hook_term.shape != (h, wc):
+                raise ValueError(f"seam_hook returned {hook_term.shape}, expected {(h, wc)}")
+        seam, total, hook_sum, seam_created = seam_step(
+            gray, extra, hook_term, seam_hook is not None, wc, forward, cost, back
+        )
+        seam_costs.append(float(total - hook_sum))
+        created += float(seam_created)
         order[rows, cols[rows, seam]] = k
         seams.append(seam)
-        img = remove_seam(img, seam)
-        gray = remove_seam(gray, seam)
-        extra = remove_seam(extra, seam)
-        cols = remove_seam(cols, seam)
+        remove_inplace(gray, extra, cols, seam, wc)
 
-    return CarveResult(image=img, order=order, seams=seams, created_energy=created)
-
-
-def _forward_cost_of(seam: IntArray, cl: FloatArray, cu: FloatArray, cr: FloatArray) -> float:
-    rows = np.arange(seam.shape[0])
-    step = np.zeros_like(seam)
-    step[1:] = seam[:-1] - seam[1:]
-    pick = np.where(step == -1, cl[rows, seam], np.where(step == 1, cr[rows, seam], cu[rows, seam]))
-    return float(pick.sum())
+    carved = img[order < 0].reshape(h, w - n, *img.shape[2:])
+    return CarveResult(
+        image=carved, order=order, seams=seams, created_energy=created, seam_costs=seam_costs
+    )
 
 
 def insert_seams(
