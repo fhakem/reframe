@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+import cv2
 import numpy as np
 
 from reframe.config import ReframeConfig
@@ -74,7 +75,7 @@ def _downscale(img: ImageArray, f: int) -> ImageArray:
     if f == 1:
         return img
     h, w = img.shape[0] // f, img.shape[1] // f
-    small = img[: h * f, : w * f].reshape(h, f, w, f, -1).mean(axis=(1, 3))
+    small = cv2.resize(np.ascontiguousarray(img), (w, h), interpolation=cv2.INTER_AREA)
     return cast(ImageArray, small)
 
 
@@ -98,7 +99,15 @@ def reframe_video(
     *,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> VideoInfo:
-    """Reframe ``src`` to ``dst``; returns the source info."""
+    """Reframe ``src`` to ``dst``; returns the source info.
+
+    Dispatches on ``cfg.mode``: ``"smart"`` (default) runs
+    :func:`reframe.core.smart.reframe_video_smart`; ``"naive"`` runs the M1 baseline.
+    """
+    if cfg.mode == "smart":
+        from reframe.core.smart import reframe_video_smart
+
+        return reframe_video_smart(src, dst, cfg, progress=progress)
     info = probe(src)
     plan = plan_frame(info.width, info.height, cfg)
     with VideoWriter(
