@@ -127,16 +127,31 @@ def _input_matrix(info: VideoInfo) -> str:
     return "bt709" if info.coded_height >= 720 else "bt601"
 
 
-def read_frames(path: str | Path, info: VideoInfo | None = None) -> Generator[ImageArray]:
-    """Yield upright uint8 RGB frames of shape (info.height, info.width, 3)."""
+def read_frames(
+    path: str | Path,
+    info: VideoInfo | None = None,
+    *,
+    size: tuple[int, int] | None = None,
+    start_frame: int = 0,
+) -> Generator[ImageArray]:
+    """Yield upright uint8 RGB frames of shape (h, w, 3).
+
+    ``size=(w, h)`` makes ffmpeg downscale while decoding (area filter), which
+    is much cheaper than decoding full frames for an analysis pass.
+    ``start_frame`` skips that many frames first (frame-accurate, decodes them).
+    """
     info = info or probe(path)
+    w, h = size or (info.width, info.height)
+    scale = f"scale={w}:{h}:flags=area:" if size else "scale="
+    vf = f"{scale}in_color_matrix={_input_matrix(info)}:in_range=auto"
+    if start_frame > 0:
+        vf = f"select=gte(n\\,{int(start_frame)}),{vf}"
     cmd = [
         _require("ffmpeg"), "-v", "error", "-nostdin", "-i", str(path),
         "-map", "0:v:0", "-fps_mode", "passthrough",
-        "-vf", f"scale=in_color_matrix={_input_matrix(info)}:in_range=auto",
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ]  # fmt: skip
-    frame_bytes = info.width * info.height * 3
+    frame_bytes = w * h * 3
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout is not None and proc.stderr is not None
     exhausted = False
@@ -146,7 +161,7 @@ def read_frames(path: str | Path, info: VideoInfo | None = None) -> Generator[Im
             if len(buf) < frame_bytes:
                 exhausted = True
                 break
-            yield np.frombuffer(buf, dtype=np.uint8).reshape(info.height, info.width, 3)
+            yield np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
     finally:
         if not exhausted:  # consumer stopped early: not an error
             proc.kill()
@@ -235,3 +250,36 @@ class VideoWriter:
             self._proc.wait()
             return
         self.close()
+
+
+def concat_and_mux(
+    segments: list[str] | list[Path], dst: str | Path, *, audio_from: VideoInfo | None
+) -> None:
+    """Concatenate same-codec video-only segments (stream copy) and mux the source audio."""
+    dst = Path(dst)
+    listing = dst.with_name(dst.name + ".concat.txt")
+    lines = []
+    for seg in segments:
+        p = str(Path(seg).resolve()).replace("'", "'\\''")
+        lines.append(f"file '{p}'\n")
+    listing.write_text("".join(lines))
+    cmd = [
+        _require("ffmpeg"), "-y", "-v", "error", "-nostdin",
+        "-f", "concat", "-safe", "0", "-i", str(listing),
+    ]  # fmt: skip
+    if audio_from is not None and audio_from.has_audio:
+        cmd += ["-i", str(audio_from.path), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]
+        if audio_from.audio_codec in MP4_AUDIO_COPY:
+            cmd += ["-c:a", "copy"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-shortest"]
+    else:
+        cmd += ["-map", "0:v:0", "-c:v", "copy"]
+    cmd += ["-movflags", "+faststart", str(dst)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise FFmpegError(f"ffmpeg concat failed: {res.stderr.strip()}")
+    finally:
+        listing.unlink(missing_ok=True)
