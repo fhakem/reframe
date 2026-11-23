@@ -12,4 +12,5 @@ dist/
 *.mp4
 *.mov
 *.mkv
-!samples/**/*.mp4
+samples/
+reframe-data/
